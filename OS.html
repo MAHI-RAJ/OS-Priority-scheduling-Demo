@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Priority (Non-preemptive) — Visual OS Scheduler</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#131a22; --ink:#e6edf3; --muted:#9aa3b2;
+    --pri:#82aaff; --pri2:#c792ea; --ok:#8bd5ca; --warn:#ffcc66; --bad:#f7768e;
+    --grid:#21293a; --edge:#293348; --chip:#151e2a;
+    --radius:16px; --shadow:0 12px 30px rgba(0,0,0,.28);
+    --moveMs: 800ms;            /* base move duration, scaled by speed */
+    --trailMs: 900ms;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; color:var(--ink); background:
+      radial-gradient(1200px 600px at 10% -10%, #13192e, transparent 60%),
+      radial-gradient(900px 600px at 100% 0%, #161c2c, transparent 50%), var(--bg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial;
+  }
+  header{ max-width:1200px; margin:0 auto; padding:28px 24px 8px; }
+  h1{ margin:0 0 6px; font-size:28px; letter-spacing:.2px; }
+  .sub{ margin:0 0 14px; color:var(--muted) }
+
+  .shell{ max-width:1200px; margin:0 auto 32px; padding:0 24px; display:grid; grid-template-columns: 1fr 360px; gap:18px; }
+  .card{ background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)) , var(--panel);
+         border:1px solid var(--edge); border-radius:var(--radius); box-shadow:var(--shadow); }
+  .card h2{ margin:0; padding:12px 14px; font-size:16px; border-bottom:1px solid #21314b; display:flex; align-items:center; gap:10px; }
+  .card .body{ padding:12px 14px; }
+  .muted{ color:var(--muted) }
+  .chip{ background:var(--chip); border:1px solid #27354c; border-radius:999px; padding:4px 10px; color:#d8e2ff; font-size:12px; }
+  .controls{ display:flex; gap:10px; align-items:center; padding:12px 14px; flex-wrap:wrap; }
+  button{
+    appearance:none; border:none; cursor:pointer; color:var(--ink);
+    background:linear-gradient(180deg,#2b3461,#222a4a); border:1px solid #39416b;
+    padding:10px 14px; border-radius:12px; transition:.15s transform, .15s background;
+  }
+  button.secondary{ background:linear-gradient(180deg,#242a46,#1d233a); border-color:#2b314e; color:#d7deff; }
+  button:hover{ transform:translateY(-1px) }
+
+  /* ======= STAGE ======= */
+  .stage{
+    position:relative; height:420px; overflow:hidden; border-radius:var(--radius);
+    background: #0e1321; border:1px solid #1e2841; margin:12px; 
+  }
+  .zone{
+    position:absolute; border:1px dashed #2a3656; border-radius:14px; padding:10px; min-width:150px;
+    background: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.01));
+  }
+  .zone h3{ margin:0 0 8px; font-size:13px; letter-spacing:.2px; color:#cfe1ff; }
+  .zone small{ color:var(--muted) }
+
+  .zone.arrival{ left:40px; top:18px; right:40px; height:80px; }
+  .zone.ready  { left:40px; top:130px; width:230px; height:250px;}
+  .zone.cpu    { left:470px; top:175px; width:170px; height:160px; display:flex; flex-direction:column; gap:8px;}
+  .zone.done   { right:40px; top:130px; width:220px; height:250px;}
+
+  .lane{ position:absolute; left:60px; right:60px; top:64px; height:2px; background:#203052; }
+  .tick{ position:absolute; width:1px; height:8px; background:#304469; top:61px; }
+  .tlabel{ position:absolute; top:44px; transform:translateX(-50%); font-size:12px; color:#9fb0ff; }
+
+  /* CPU indicator */
+  .cpu-box{ flex:1; border:1px solid #2a3656; border-radius:12px; background:#0e172a; display:grid; place-items:center; }
+  .cpu-chip{ font-weight:700; padding:8px 12px; border-radius:10px; border:1px solid #3b4a7a; background:#17233d; }
+  .beam{ position:absolute; left:270px; top:230px; width:210px; height:2px; background:linear-gradient(90deg, transparent, #7ba2ff, transparent); opacity:0; }
+  .beam.active{ animation: beam .9s ease-out; }
+  @keyframes beam{ 0%{opacity:.0} 15%{opacity:.9} 100%{opacity:0} }
+
+  /* Token (process) */
+  .tok{
+    position:absolute; transform:translate(-9999px,-9999px);
+    background:linear-gradient(180deg,#1b2540,#151e33);
+    border:1px solid #354574; color:#e9efff;
+    padding:8px 10px; border-radius:12px; font-weight:700; letter-spacing:.3px;
+    box-shadow:0 6px 20px rgba(0,0,0,.35);
+    transition: transform var(--moveMs) cubic-bezier(.22,.8,.29,1), box-shadow .2s;
+  }
+  .tok .meta{ display:block; font-weight:600; font-size:11px; color:#bcd0ff; margin-top:2px;}
+  .tok .meta em{ color:#ffd580; font-style:normal }
+  .tok.wait{ outline:2px dashed #37528a; outline-offset:-3px; }
+  .tok.run{ box-shadow:0 0 0 3px #294cfd22, 0 0 28px 6px #5e8cff40; }
+  .tok.done{ opacity:.9; }
+
+  /* trail line */
+  .trail{
+    position:absolute; width:0; height:0; border-top:2px dashed #3d5590; opacity:0;
+    transition: opacity .25s;
+  }
+  .trail.show{ opacity:.8; transition: opacity .25s; }
+
+  /* Explanation bubble */
+  .explain{
+    position:absolute; left:50%; top:98px; transform:translateX(-50%);
+    background:#101a31; border:1px solid #30426e; border-radius:12px; padding:8px 12px; color:#dfe8ff;
+    box-shadow:var(--shadow); font-size:14px; max-width:760px; display:none;
+  }
+  .explain.show{ display:block; animation: pop .25s ease-out; }
+  @keyframes pop{ from{transform:translateX(-50%) scale(.97); opacity:.6} to{transform:translateX(-50%) scale(1); opacity:1} }
+
+  /* Progress bar */
+  .progress{ height:10px; border-radius:999px; border:1px solid #294174; background:#17233b; overflow:hidden; }
+  .progress > div{ height:100%; width:0%; background:linear-gradient(90deg,var(--pri),var(--pri2)); transition: width .12s linear; }
+
+  /* Gantt */
+  .gantt{ width:100%; height:180px; display:block; background:#0e1426; border:1px solid #203052; border-radius:12px; }
+
+  /* Right column */
+  .log{ height:210px; overflow:auto; padding-right:4px; }
+  .log p{ margin:0 0 8px; color:#d6ddff; }
+  .time{ color:#88a6ff }
+  table{ width:100%; border-collapse:collapse; }
+  th,td{ padding:8px 10px; border-bottom:1px solid #233052; text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  tfoot td{ color:#cfe1ff; font-weight:600 }
+  .chip.kbd{ background:#17233b; border-color:#2c3c66; color:#c9d8ff; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Priority Scheduling (Non-preemptive) — Moving Objects</h1>
+  <p class="sub">Lower number = higher priority. Processes: P1(AT0,BT4,Pr2), P2(AT1,BT3,Pr1), P3(AT2,BT1,Pr3), P4(AT3,BT2,Pr2).</p>
+</header>
+
+<div class="shell">
+  <!-- LEFT: Stage + Gantt -->
+  <section class="card">
+    <div class="controls">
+      <button id="play">▶ Play</button>
+      <button class="secondary" id="pause">⏸ Pause</button>
+      <button class="secondary" id="reset">⟲ Reset</button>
+      <button class="secondary" id="step">➤ Step +1</button>
+      <div style="margin-left:auto;display:flex;gap:10px;align-items:center">
+        <span class="muted">Speed</span>
+        <input id="speed" type="range" min="0.25" max="3" step="0.25" value="1" />
+        <span id="speedVal" class="chip">1.00×</span>
+      </div>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="lane"></div>
+      <!-- time ticks -->
+      <div id="ticks"></div>
+
+      <!-- Zones -->
+      <div class="zone arrival"><h3>Arrival Timeline</h3><small>Tokens appear at their arrival time (t) and travel to the Ready Queue.</small></div>
+      <div class="zone ready"><h3>Ready Queue</h3><small>Sorted by priority (lower = higher). No preemption.</small></div>
+      <div class="zone cpu">
+        <h3>CPU</h3>
+        <div class="cpu-box"><span id="cpuState" class="cpu-chip">Idle</span></div>
+        <div class="progress"><div id="cpuProg"></div></div>
+      </div>
+      <div class="zone done"><h3>Completed</h3><small>Finished processes line up here.</small></div>
+
+      <!-- selection beam -->
+      <div class="beam" id="beam"></div>
+
+      <!-- moving tokens + trails are injected here -->
+      <div id="actors"></div>
+
+      <!-- explanation bubble -->
+      <div id="explain" class="explain"></div>
+    </div>
+
+    <div class="body">
+      <h3 style="margin:0 0 10px;font-size:14px;color:#cfe1ff;">Gantt Chart</h3>
+      <svg id="gantt" class="gantt" viewBox="0 0 960 180" preserveAspectRatio="none"></svg>
+    </div>
+  </section>
+
+  <!-- RIGHT: Log + Metrics -->
+  <section class="card">
+    <h2>Live Log & Metrics</h2>
+    <div class="body">
+      <div class="log" id="log"></div>
+      <div style="height:10px"></div>
+      <table>
+        <thead>
+          <tr><th>Process</th><th>AT</th><th>BT</th><th>Pr</th><th>Start</th><th>CT</th><th>TAT</th><th>WT</th><th>RT</th></tr>
+        </thead>
+        <tbody id="tbl"></tbody>
+        <tfoot>
+          <tr><td>Average</td><td colspan="4"></td><td></td>
+            <td id="avgTAT">–</td><td id="avgWT">–</td><td id="avgRT">–</td></tr>
+        </tfoot>
+      </table>
+      <div style="height:10px"></div>
+      <div class="muted">
+        <span class="chip kbd">Space</span> Play/Pause •
+        <span class="chip kbd">R</span> Reset •
+        <span class="chip kbd">→</span> Step +1
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+/* =========================== DATA =========================== */
+const processes = [
+  { id:'P1', at:0, bt:4, pr:2 },
+  { id:'P2', at:1, bt:3, pr:1 },
+  { id:'P3', at:2, bt:1, pr:3 },
+  { id:'P4', at:3, bt:2, pr:2 },
+];
+
+/* ====================== SCHEDULE LOGIC ====================== */
+function computeSchedule(ps){
+  const n = ps.length;
+  const procs = ps.map(p => ({...p}));
+  const done = new Set();
+  let t = Math.min(...procs.map(p=>p.at));
+  const segments = [];           // [{id,start,end,pr,bt,at}]
+  const starts = {}, completes = {};
+
+  while(done.size < n){
+    const avail = procs.filter(p => !done.has(p.id) && p.at <= t);
+    if (!avail.length){
+      t = Math.min(...procs.filter(p => !done.has(p.id)).map(p=>p.at));
+      continue;
+    }
+    avail.sort((a,b)=> a.pr-b.pr || a.at-b.at || a.id.localeCompare(b.id));
+    const p = avail[0];
+    const start = t, end = t + p.bt;
+    segments.push({ id:p.id, start, end, pr:p.pr, bt:p.bt, at:p.at });
+    starts[p.id] = start; completes[p.id] = end;
+    done.add(p.id); t = end;
+  }
+  const metrics = procs.map(p=>{
+    const start = starts[p.id], ct = completes[p.id];
+    const tat = ct - p.at, wt = tat - p.bt, rt = start - p.at;
+    return { ...p, start, ct, tat, wt, rt };
+  });
+  return { segments, metrics, totalTime: Math.max(...Object.values(completes)) };
+}
+const { segments, metrics, totalTime } = computeSchedule(processes);
+
+/* =========================== STAGE ========================== */
+const stage = document.getElementById('stage');
+const actors = document.getElementById('actors');
+const explain = document.getElementById('explain');
+const beam = document.getElementById('beam');
+const cpuState = document.getElementById('cpuState');
+const cpuProg = document.getElementById('cpuProg');
+const logEl = document.getElementById('log');
+
+// time ticks on arrival lane
+(function drawTicks(){
+  const ticks = document.getElementById('ticks');
+  const left=60, right=stage.clientWidth-60;
+  for(let t=0;t<=totalTime;t++){
+    const x = left + (t/totalTime) * (right-left);
+    const div = document.createElement('div'); div.className='tick';
+    div.style.left = x+'px'; ticks.appendChild(div);
+    const lbl = document.createElement('div'); lbl.className='tlabel';
+    lbl.style.left = x+'px'; lbl.textContent = t; ticks.appendChild(lbl);
+  }
+})();
+
+// coordinates
+const READY_X = 120, READY_Y0 = 190, READY_STEP = 48;
+const CPU_X = 540, CPU_Y = 235;
+const DONE_X = stage.clientWidth - 150, DONE_Y0 = 170, DONE_STEP = 48;
+// arrival spawn X based on AT
+function spawnPosX(at){
+  const left=60, right=stage.clientWidth-60;
+  return left + (at/totalTime) * (right-left);
+}
+
+/* ===== create tokens & trails ===== */
+const tokenMap = new Map();   // id -> {el, trail}
+function makeToken(p){
+  const el = document.createElement('div');
+  el.className = 'tok'; el.id = 'tok-'+p.id;
+  el.innerHTML = `${p.id}<span class="meta">AT ${p.at} • BT ${p.bt} • Pr <em>${p.pr}</em></span>`;
+  actors.appendChild(el);
+
+  const trail = document.createElement('div');
+  trail.className = 'trail'; actors.appendChild(trail);
+
+  tokenMap.set(p.id, {el, trail});
+}
+processes.forEach(makeToken);
+
+/* position helper (animated) */
+function moveToken(id, x, y, showTrail=true){
+  const {el, trail} = tokenMap.get(id);
+  const rect = el.getBoundingClientRect();
+  const srect = stage.getBoundingClientRect();
+  const curX = rect.left - srect.left, curY = rect.top - srect.top;
+  el.style.transform = `translate(${x}px, ${y}px)`;
+  if (showTrail){
+    // draw a little dashed trail from previous to new
+    const dx = x - curX, dy = y - curY;
+    const len = Math.hypot(dx,dy);
+    if (isFinite(len) && len>0 && curX>-9000){
+      const ang = Math.atan2(dy,dx) * 180/Math.PI;
+      trail.style.left = (curX+8)+'px';
+      trail.style.top = (curY+18)+'px';
+      trail.style.width = len+'px';
+      trail.style.transform = `rotate(${ang}deg)`;
+      trail.classList.add('show');
+      setTimeout(()=>trail.classList.remove('show'), parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--trailMs'))||900);
+    }
+  }
+}
+
+/* ====================== GANTT (SVG) ====================== */
+const gantt = document.getElementById('gantt');
+const GW=960, GH=180, GPAD=40; const giW = GW-GPAD-20, giH = GH-GPAD-20;
+function t2x(t){ return GPAD + (t/totalTime) * giW; }
+function drawGantt(){
+  const ns="http://www.w3.org/2000/svg"; gantt.innerHTML='';
+  const bg=document.createElementNS(ns,'rect'); bg.setAttribute('x',10); bg.setAttribute('y',10);
+  bg.setAttribute('width',GW-20); bg.setAttribute('height',GH-20); bg.setAttribute('rx',12);
+  bg.setAttribute('fill','#0b1223'); gantt.appendChild(bg);
+  for(let t=0;t<=totalTime;t++){
+    const x=t2x(t); const line=document.createElementNS(ns,'line');
+    line.setAttribute('x1',x); line.setAttribute('y1',GPAD-6);
+    line.setAttribute('x2',x); line.setAttribute('y2',GH-14);
+    line.setAttribute('stroke','#213050'); gantt.appendChild(line);
+    const label=document.createElementNS(ns,'text');
+    label.setAttribute('x',x); label.setAttribute('y',GPAD-12);
+    label.setAttribute('text-anchor','middle'); label.setAttribute('fill','#9fb0ff');
+    label.setAttribute('font-size','12'); label.textContent=t; gantt.appendChild(label);
+  }
+  segments.forEach((s,i)=>{
+    const y = GPAD + 20 + i*30;
+    const shell=document.createElementNS(ns,'rect');
+    shell.setAttribute('x', t2x(s.start)); shell.setAttribute('y', y-8);
+    shell.setAttribute('width', t2x(s.end)-t2x(s.start)); shell.setAttribute('height', 16);
+    shell.setAttribute('rx',6); shell.setAttribute('fill','#162245'); shell.setAttribute('stroke','#34407a');
+    gantt.appendChild(shell);
+    const fill=document.createElementNS(ns,'rect');
+    fill.setAttribute('x', t2x(s.start)); fill.setAttribute('y', y-8);
+    fill.setAttribute('width', 0); fill.setAttribute('height', 16); fill.setAttribute('rx',6);
+    fill.setAttribute('fill', i%2? '#8bd5ca':'#82aaff'); fill.setAttribute('id', 'bar-'+s.id);
+    gantt.appendChild(fill);
+    const label=document.createElementNS(ns,'text'); label.setAttribute('x', 16); label.setAttribute('y', y+4);
+    label.setAttribute('fill','#eaf0ff'); label.setAttribute('font-size','12'); label.textContent=s.id; gantt.appendChild(label);
+  });
+}
+drawGantt();
+
+/* =================== METRICS TABLE =================== */
+function renderTable(partial=Infinity){
+  const tbody = document.getElementById('tbl'); tbody.innerHTML='';
+  let sumT=0,sumW=0,sumR=0,c=0;
+  metrics.forEach(m=>{
+    const finished = m.ct<=partial;
+    const tr = document.createElement('tr');
+    const cells=[m.id,m.at,m.bt,m.pr,m.start, finished?m.ct:'–', finished?m.tat:'–',finished?m.wt:'–',m.rt];
+    cells.forEach((v,i)=>{ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); });
+    tbody.appendChild(tr);
+    if(finished){ sumT+=m.tat; sumW+=m.wt; sumR+=m.rt; c++; }
+  });
+  const fmt=(x)=> c? (x/c).toFixed(2):'–';
+  document.getElementById('avgTAT').textContent = fmt(sumT);
+  document.getElementById('avgWT').textContent  = fmt(sumW);
+  document.getElementById('avgRT').textContent  = fmt(sumR);
+}
+
+/* ==================== SIMULATION CORE ==================== */
+let simTime = 0, playing = false, speed = 1, raf = null, lastTs = null;
+
+function log(t,msg){
+  const p=document.createElement('p'); p.innerHTML=`<span class="time">t=${t}</span> — ${msg}`;
+  logEl.appendChild(p); logEl.scrollTop = logEl.scrollHeight;
+}
+function showExplain(text){
+  explain.textContent = text;
+  explain.classList.add('show');
+  clearTimeout(showExplain._t);
+  showExplain._t = setTimeout(()=>explain.classList.remove('show'), 2200 / speed);
+}
+
+function currentSegmentAt(t){
+  return segments.find(s => t>=s.start && t<s.end) || null;
+}
+function onDecision(t){
+  // Selection reason at segment start
+  const s = segments.find(x=>x.start===t);
+  if (!s) return;
+  const pool = processes.filter(p => p.at<=t && t < metrics.find(m=>m.id===p.id).ct)
+                        .filter(p => t < metrics.find(m=>m.id===p.id).start); // those waiting only
+  const poolStr = pool.map(p=>`${p.id}(Pr${p.pr})`).join(', ') || '∅';
+  const minPr = Math.min(...pool.map(p=>p.pr));
+  const picked = s.id;
+  showExplain(`t=${t}: CPU idle. Ready = [${poolStr}]. Lowest priority number is ${minPr} → ${picked} selected.`);
+  beam.classList.add('active'); setTimeout(()=>beam.classList.remove('active'), 900/speed);
+}
+function onArrival(t){
+  processes.filter(p=>p.at===t).forEach(p=>{
+    log(t, `${p.id} arrived (Pr ${p.pr}, BT ${p.bt})`);
+    const running = currentSegmentAt(t);
+    if (running && p.pr < running.pr){
+      showExplain(`t=${t}: ${p.id} has higher priority than running ${running.id}, but **non-preemptive** → it must wait until ${running.id} finishes.`);
+    }
+  });
+}
+
+/* ===== position tokens for a given time ===== */
+function layout(now, animate=true){
+  // Update CSS move duration with speed
+  document.documentElement.style.setProperty('--moveMs', `${Math.max(150, 800/ speed)}ms`);
+  document.documentElement.style.setProperty('--trailMs', `${Math.max(150, 900/ speed)}ms`);
+
+  // Arrival positions & movements
+  processes.forEach(p=>{
+    const {el} = tokenMap.get(p.id);
+    const spawnX = spawnPosX(p.at), spawnY = 20;
+    if (now < p.at){ // before arrival: keep at spawn (hidden until appear)
+      el.style.transform = `translate(${spawnX-24}px, ${spawnY}px)`;
+      el.style.opacity = .0;
+      return;
+    }
+    el.style.opacity = 1;
+
+    // Determine state: waiting / running / finished
+    const seg = segments.find(s=>s.id===p.id);
+    if (now < seg.start){
+      el.classList.add('wait'); el.classList.remove('run','done');
+    } else if (now < seg.end){
+      el.classList.add('run'); el.classList.remove('wait','done');
+    } else {
+      el.classList.add('done'); el.classList.remove('wait','run');
+    }
+  });
+
+  // Compute waiting order at "now" (strictly before start & after AT)
+  const waiting = processes
+     .filter(p=> p.at<=now && now < metrics.find(m=>m.id===p.id).start)
+     .sort((a,b)=> a.pr-b.pr || a.at-b.at || a.id.localeCompare(b.id));
+  waiting.forEach((p,i)=>{
+    moveToken(p.id, READY_X, READY_Y0 + i*READY_STEP, animate);
+  });
+
+  // Running (one at most)
+  const seg = currentSegmentAt(now);
+  if (seg){
+    moveToken(seg.id, CPU_X, CPU_Y, animate);
+    cpuState.textContent = `${seg.id} (t ${seg.start}→${seg.end})`;
+    const prog = Math.max(0, Math.min(1, (now - seg.start)/(seg.end-seg.start)));
+    cpuProg.style.width = (prog*100).toFixed(2)+'%';
+  } else {
+    cpuState.textContent = 'Idle';
+    cpuProg.style.width = '0%';
+  }
+
+  // Completed
+  const finished = processes.filter(p => metrics.find(m=>m.id===p.id).ct <= now)
+                            .sort((a,b)=> metrics.find(m=>m.id===a.id).ct - metrics.find(m=>m.id===b.id).ct);
+  finished.forEach((p,i)=> moveToken(p.id, DONE_X, DONE_Y0 + i*DONE_STEP, animate));
+
+  // Gantt filling
+  segments.forEach(s=>{
+    const bar = document.getElementById('bar-'+s.id);
+    const startX = t2x(s.start), endX=t2x(s.end), maxW=endX-startX;
+    let w=0; if (now>s.start) w = Math.min(1,(now-s.start)/(s.end-s.start))*maxW;
+    bar.setAttribute('width', Math.max(0,w));
+  });
+
+  renderTable(now);
+}
+
+/* ================== EVENTS & LOOP ================== */
+const seen = new Set();
+function update(ts){
+  if(!playing){ lastTs=null; return; }
+  if(lastTs==null) lastTs = ts;
+  const dt = (ts-lastTs)/1000; lastTs = ts;
+  simTime += dt * speed;
+  if (simTime >= totalTime){ simTime = totalTime; playing=false; }
+  const tInt = Math.floor(simTime);
+
+  // arrivals / decisions once per integer tick
+  if(!seen.has('arr'+tInt)){ onArrival(tInt); seen.add('arr'+tInt); }
+  if(!seen.has('dec'+tInt)){ onDecision(tInt); seen.add('dec'+tInt); }
+
+  layout(simTime);
+  raf = requestAnimationFrame(update);
+}
+
+/* ================== CONTROLS ================== */
+const btnPlay = document.getElementById('play');
+const btnPause = document.getElementById('pause');
+const btnReset = document.getElementById('reset');
+const btnStep  = document.getElementById('step');
+const speedSlider = document.getElementById('speed');
+const speedVal = document.getElementById('speedVal');
+
+function play(){ if(simTime>=totalTime) reset(true); playing=true; cancelAnimationFrame(raf); raf=requestAnimationFrame(update); }
+function pause(){ playing=false; }
+function reset(keepLog=false){
+  playing=false; simTime=0; lastTs=null; seen.clear();
+  cpuProg.style.width='0%'; cpuState.textContent='Idle';
+  if(!keepLog){ logEl.innerHTML=''; }
+  explain.classList.remove('show');
+  layout(0,false);
+  // Pre-log arrivals at t=0 + selection at t=0
+  processes.forEach(p=>{ if(p.at===0) log(0, `${p.id} arrived (Pr ${p.pr}, BT ${p.bt})`); });
+  const s0 = segments.find(s=>s.start===0);
+  if (s0){ log(0, `CPU selected ${s0.id} (non-preemptive)`); showExplain(`t=0: CPU idle → choose ${s0.id} (lowest priority among arrivals).`); }
+}
+function step(){ pause(); simTime = Math.min(totalTime, Math.floor(simTime)+1); layout(simTime); onArrival(simTime); onDecision(simTime); }
+
+btnPlay.onclick = play; btnPause.onclick=pause; btnReset.onclick=()=>reset(false); btnStep.onclick=step;
+speedSlider.oninput = e=>{ speed=parseFloat(e.target.value); speedVal.textContent = speed.toFixed(2)+'×'; };
+
+window.addEventListener('keydown', (e)=>{
+  if (e.code==='Space'){ e.preventDefault(); playing?pause():play(); }
+  else if (e.key==='r' || e.key==='R'){ reset(false); }
+  else if (e.key==='ArrowRight'){ step(); }
+});
+
+/* ================== INITIALIZE ================== */
+reset(true);      // layout & initial logs
+layout(0,false);  // place tokens at t=0
+</script>
+</body>
+</html>
+
